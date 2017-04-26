@@ -284,6 +284,10 @@ artificial_stack_t::artificial_stack_t(void (*initial_fun)(void), size_t _stack_
     // Note: r12 is also stored, in the 'caller frame' slot above the return
     // address.
     sp -= 8; // r4-r11.
+#elif defined(__aarch64__)
+    /* We must preserve r4, r5, r6, r7, r8, r9, r10, and r11. Because we have to store the LR (r14) in swapcontext as well, we also store r12 in swapcontext to keep the stack double-word-aligned. However, we already accounted for both of those by decrementing sp twice above (once for r14 and once for r12, say). */
+    sp -= 8;
+	
 #elif defined(__s390x__)
     sp -= 16; // r6-r13 and f8-f15.
 #else
@@ -444,7 +448,7 @@ void context_switch(artificial_stack_context_ref_t *current_context_out, artific
 }
 
 asm(
-#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined (__s390x__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined (__s390x__) || defined(__aarch64__)
 // We keep architecture-specific code interleaved in order to enforce commonality.
 #if defined(__x86_64__)
 #if defined(__LP64__) || defined(__LLP64__)
@@ -488,6 +492,11 @@ asm(
     "push {r12}\n"
     "push {r14}\n"
     "push {r4-r11}\n"
+#elif defined(__aarch64__)
+    /* Note that we push `LR` (`r14`) since that's not implicitly done at a call on ARM. We include `r12` just to keep the stack double-word-aligned. The order here is really important, as it must match the way we set up the stack in artificial_stack_t::artificial_stack_t. For consistency with the other architectures, we push `r12` first, then `r14`, then the rest. */
+    "push {r12}\n"
+    "push {r14}\n"
+    "push {r4-r11}\n"
 #elif defined(__s390x__)
     // Preserve r6-r13, the return address (r14), and f8-f15.
     "aghi %r15, -136\n"
@@ -514,6 +523,9 @@ asm(
 #elif defined(__arm__)
     /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
     "str r13, [r0]\n"
+#elif defined(__aarch64__)
+    /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
+    "str r13, [r0]\n"
 #elif defined(__s390x__)
     /* On s390x, the first argument is in r2. r15 is the stack pointer. */
     "stg %r15, 0(%r2)\n"
@@ -529,6 +541,9 @@ asm(
     /* On amd64, the second argument comes from rsi. */
     "movq %rsi, %rsp\n"
 #elif defined(__arm__)
+    /* On ARM, the second argument is in `r1` */
+    "mov r13, r1\n"
+#elif defined(__aarch64__)
     /* On ARM, the second argument is in `r1` */
     "mov r13, r1\n"
 #elif defined(__s390x__)
@@ -552,6 +567,10 @@ asm(
     "pop {r4-r11}\n"
     "pop {r14}\n"
     "pop {r12}\n"
+#elif defined(__aarch64__)
+    "pop {r4-r11}\n"
+    "pop {r14}\n"
+    "pop {r12}\n"
 #elif defined(__s390x__)
     "lmg %r6, %r14, 64(%r15)\n"
     "ld %f8, 0(%r15)\n"
@@ -572,6 +591,10 @@ asm(
     initialized with `artificial_stack_t()`). */
     "ret\n"
 #elif defined(__arm__)
+    /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
+    jump to the correct return address. */
+    "bx r14\n"
+#elif defined(__aarch64__)
     /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
     jump to the correct return address. */
     "bx r14\n"
