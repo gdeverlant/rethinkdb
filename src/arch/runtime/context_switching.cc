@@ -1,172 +1,11 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
+#include "arch/runtime/context_switching.hpp"
 
 #ifdef _WIN32
 
-#include <tuple>
-
-#include "windows.hpp"
-#include "errors.hpp"
-#include "arch/runtime/context_switching.hpp"
-#include "arch/compiler.hpp"
-#include "logger.hpp"
-
-// Some declarations used to measure the stack size
-// from http://undocumented.ntinternals.net/
-
-#include <Ntsecapi.h>
-
-typedef struct {
-    PVOID UniqueProcess;
-    PVOID UniqueThread;
-} CLIENT_ID;
-
-typedef LONG KPRIORITY;
-
-typedef struct {
-    NTSTATUS ExitStatus;
-    PVOID TebBaseAddress;
-    CLIENT_ID ClientId;
-    KAFFINITY AffinityMask;
-    KPRIORITY Priority;
-    KPRIORITY BasePriority;
-} THREAD_BASIC_INFORMATION;
-
-typedef NTSYSAPI NTSTATUS
-(NTAPI *NtReadVirtualMemory_t)(IN HANDLE               ProcessHandle,
-                               IN PVOID                BaseAddress,
-                               OUT PVOID               Buffer,
-                               IN ULONG                NumberOfBytesToRead,
-                               OUT PULONG              NumberOfBytesReaded);
-
-enum THREADINFOCLASS { ThreadBasicInformation = 0 };
-
-typedef NTSTATUS
-(WINAPI *NtQueryInformationThread_t)(HANDLE          ThreadHandle,
-                                     THREADINFOCLASS ThreadInformationClass,
-                                     PVOID           ThreadInformation,
-                                     ULONG           ThreadInformationLength,
-                                     PULONG          ReturnLength);
-
-fiber_context_ref_t::~fiber_context_ref_t() {
-    rassert(fiber == nullptr, "leaking a fiber");
-}
-
-THREAD_LOCAL void* thread_initial_fiber = nullptr;
-
-void coro_initialize_for_thread() {
-    if (thread_initial_fiber == nullptr) {
-        thread_initial_fiber = ConvertThreadToFiber(nullptr);
-        guarantee_winerr(thread_initial_fiber != nullptr, "ConvertThreadToFiber failed");
-    }
-}
-
-void save_stack_info(fiber_stack_t *stack) {
-    static HMODULE ntdll = LoadLibrary("ntdll.dll");
-    static NtQueryInformationThread_t NtQueryInformationThread =
-        reinterpret_cast<NtQueryInformationThread_t>(
-            GetProcAddress(ntdll, "NtQueryInformationThread"));
-    static NtReadVirtualMemory_t NtReadVirtualMemory =
-        reinterpret_cast<NtReadVirtualMemory_t>(
-            GetProcAddress(ntdll, "NtReadVirtualMemory"));
-    static bool warned = false;
-    if (NtQueryInformationThread == nullptr ||
-        NtReadVirtualMemory == nullptr) {
-        if (!warned) {
-            logWRN("save_stack_info: GetProcAddress failed");
-            warned = true;
-        }
-        stack->has_stack_info = false;
-        return;
-    }
-    THREAD_BASIC_INFORMATION info;
-    NTSTATUS res = NtQueryInformationThread(GetCurrentThread(),
-                                            ThreadBasicInformation,
-                                            &info,
-                                            sizeof(info),
-                                            nullptr);
-    if (res != 0) {
-        logWRN("NtQueryInformationThread failed: %s",
-               winerr_string(LsaNtStatusToWinError(res)).c_str());
-        stack->has_stack_info = false;
-        return;
-    }
-    NT_TIB tib;
-    res = NtReadVirtualMemory(GetCurrentProcess(),
-                              info.TebBaseAddress,
-                              &tib,
-                              sizeof(tib),
-                              nullptr);
-    if (res != 0) {
-        logWRN("NtReadVirtualMemory failed: %s",
-               winerr_string(LsaNtStatusToWinError(res)).c_str());
-        stack->has_stack_info = false;
-        return;
-    }
-    stack->stack_base = reinterpret_cast<char*>(tib.StackBase);
-    stack->stack_limit = reinterpret_cast<char*>(tib.StackLimit);
-    stack->has_stack_info = true;
-}
-
-fiber_stack_t::fiber_stack_t(void(*initial_fun)(void), size_t stack_size) {
-    auto tuple = std::make_tuple(initial_fun, this, GetCurrentFiber());
-    typedef decltype(tuple) data_t;
-    context.fiber = CreateFiberEx(
-        stack_size,
-        stack_size,
-        0, // don't switch floating-point state
-        [](void* data) {
-            void (*initial_fun)();
-            fiber_stack_t *self;
-            void *parent_fiber;
-            std::tie(initial_fun, self, parent_fiber) = *reinterpret_cast<data_t*>(data);
-            save_stack_info(self);
-            SwitchToFiber(parent_fiber);
-            initial_fun();
-        },
-        reinterpret_cast<void*>(&tuple));
-    guarantee_winerr(context.fiber != nullptr, "CreateFiber failed");
-    SwitchToFiber(context.fiber);
-}
-
-fiber_stack_t::~fiber_stack_t() {
-    DeleteFiber(context.fiber);
-    context.fiber = nullptr;
-}
-
-bool fiber_stack_t::address_in_stack(const void *addr) const {
-    if (!has_stack_info) {
-        rassert(has_stack_info, "could not determine stack limits");
-        return true;
-    }
-    const char *a = reinterpret_cast<const char*>(addr);
-    return stack_limit < a && a <= stack_base;
-}
-
-bool fiber_stack_t::address_is_stack_overflow(const void *addr) const {
-    if (!has_stack_info) {
-        rassert(has_stack_info, "could not determine stack limits");
-        return false;
-    }
-    return reinterpret_cast<const char*>(addr) <= stack_limit;
-}
-
-size_t fiber_stack_t::free_space_below(const void *addr) const {
-    guarantee(address_in_stack(addr));
-    return reinterpret_cast<const char*>(addr) - stack_limit;
-}
-
-void context_switch(fiber_context_ref_t *curr_context_out, fiber_context_ref_t *dest_context_in) {
-    rassert(curr_context_out->fiber == nullptr, "switching from non-null context: %p", curr_context_out->fiber);
-    rassert(dest_context_in->fiber != nullptr);
-    curr_context_out->fiber = GetCurrentFiber();
-    void *dest_context = dest_context_in->fiber;
-    dest_context_in->fiber = nullptr;
-    SwitchToFiber(dest_context);
-}
+// TODO WINDOWS
 
 #else
-
-#include "arch/runtime/context_switching.hpp"
 
 #include <errno.h>
 #include <pthread.h>
@@ -209,91 +48,73 @@ bool artificial_stack_context_ref_t::is_nil() {
 artificial_stack_t::artificial_stack_t(void (*initial_fun)(void), size_t _stack_size)
     : stack(_stack_size), stack_size(_stack_size), overflow_protection_enabled(false) {
 
-    // Tell the operating system that it can unmap the stack space
-    // (except for the first page, which we are definitely going to need).
-    // This is an optimization to keep memory consumption in check.
+    /* Tell the operating system that it can unmap the stack space
+    (except for the first page, which we are definitely going to need).
+    This is an optimization to keep memory consumption in check. */
     guarantee(stack_size >= static_cast<size_t>(getpagesize()));
     madvise(stack.get(), stack_size - getpagesize(), MADV_DONTNEED);
 
-    // Register our stack with Valgrind so that it understands what's going on
-    // and doesn't create spurious errors.
+    /* Register our stack with Valgrind so that it understands what's going on
+    and doesn't create spurious errors */
 #ifdef VALGRIND
     valgrind_stack_id = VALGRIND_STACK_REGISTER(stack.get(), (intptr_t)stack.get() + stack_size);
 #endif
 
-    // Setup the new stack (grows downwards).
-    //
-    // +---------------+ <- (1) initial sp.
-    // |               |
-    // +---------------+ <- (2) sp aligned as needed.
-    // |               |
-    // +---------------+ <- (3) sp after allocating (fake) caller stack frame;
-    // |  initial_fun  |    will be the stack pointer at entry to initial_fun.
-    // +---------------+ <- (4) sp after pushing the return address, initial_fun.
-    // |               |
-    // |  callee-save  |
-    // |   registers   |
-    // |               |
-    // +---------------+ <- (5) sp after allocating space for callee-save registers.
-    //
-    // When swapcontext is called it will pop the callee-save registers off of the
-    // stack (may be junk), pop initial_fun off the stack and then jump to initial_fun.
-    uintptr_t *sp;
+    /* Set up the stack... */
 
-    // (1) initialize sp to point at the top of the stack.
+    uintptr_t *sp; /* A pointer into the stack. Note that uintptr_t is ideal since it points to something of the same size as the native word or pointer. */
+
+    /* Start at the beginning. */
     sp = reinterpret_cast<uintptr_t *>(uintptr_t(stack.get()) + stack_size);
 
-    // (2) align sp to meet platform ABI requirements.
-    // Note: not all platforms require 16-byte alignment, but it is easier to do it
-    // everywhere.
+    /* Align stack. The x86-64 ABI requires the stack pointer to always be
+    16-byte-aligned at function calls. That is, "(%rsp - 8) is always a multiple
+    of 16 when control is transferred to the function entry point". */
     sp = reinterpret_cast<uintptr_t *>(uintptr_t(sp) & static_cast<uintptr_t>(-16L));
 
-    // (3) allocate caller stack frame.
-#if defined(__i386__) || defined(__x86_64__)
-    // The x86-64 ABI requires the stack pointer to always be 16-byte-aligned at
-    // function calls. That is, "(%rsp - 8) is always a multiple of 16 when control
-    // is transferred to the function entry point".
-    const size_t min_frame = 1;
-#elif defined(__s390x__)
-    // The s390x ABI requires a 160-byte caller allocated register save area.
-    const size_t min_frame = 20;
-#elif defined(__arm__)
-    // This slot is used to store r12.
-    const size_t min_frame = 1;
-#endif
-    // Zero the caller stack frame. Prevents Valgrind complaining about uninitialized
-    // value errors when throwing an uncaught exception.
-    for (size_t i = 0; i < min_frame; i++) {
-        sp--;
-        *sp = 0;
-    }
+    // Currently sp is 16-byte aligned.
 
-    // (4) write the return address to the stack.
+    /* Set up the instruction pointer; this will be popped off the stack by ret (or popped
+    explicitly, for ARM) in swapcontext once all the other registers have been "restored". */
     sp--;
+
+    /* This seems to prevent Valgrind from complaining about uninitialized value
+    errors when throwing an uncaught exception. My assembly-fu isn't strong
+    enough to explain why, though. */
+    /* Also, on ARM, this gets popped into `r12` */
+    *sp = 0;
+
+    sp--;
+
+    // Subtracted 2*sizeof(uintptr_t), so sp is still double-word-size (16-byte for amd64) aligned.
+
     *sp = reinterpret_cast<uintptr_t>(initial_fun);
 
-    // (5) allocate space for callee-save registers. These will be popped off the
-    // stack by swapcontext but initial_fun should ignore their contents so we
-    // don't initialize them to anything.
-    // See swapcontext for more information about the way registers are restored.
 #if defined(__i386__)
-    sp -= 4; // esi, edi, ebx and ebp.
+    /* For i386, we are obligated (by the A.B.I. specification) to preserve esi, edi, ebx, ebp, and esp. We do not push esp onto the stack, though, since we will have needed to retrieve it anyway in order to get to the point on the stack from which we would pop. */
+    sp -= 4;
 #elif defined(__x86_64__)
-    sp -= 6; // r12-r15, rbx and rbp.
+    /* These registers (r12, r13, r14, r15, rbx, rbp) are going to be popped off
+    the stack by swapcontext; they're callee-saved, so whatever happens to be in
+    them will be ignored. */
+    sp -= 6;
 #elif defined(__arm__)
-    // Note: r12 is also stored, in the 'caller frame' slot above the return
-    // address.
-    sp -= 8; // r4-r11.
-#elif defined(__s390x__)
-    sp -= 16; // r6-r13 and f8-f15.
+    /* We must preserve r4, r5, r6, r7, r8, r9, r10, and r11. Because we have to store the LR (r14) in swapcontext as well, we also store r12 in swapcontext to keep the stack double-word-aligned. However, we already accounted for both of those by decrementing sp twice above (once for r14 and once for r12, say). */
+    sp -= 8
+#elif defined(__aarch64__)
+    /* We must preserve r4, r5, r6, r7, r8, r9, r10, and r11. Because we have to store the LR (r14) in swapcontext as well, we also store r12 in swapcontext to keep the stack double-word-aligned. However, we already accounted for both of those by decrementing sp twice above (once for r14 and once for r12, say). */
+    sp -= 8;
 #else
 #error "Unsupported architecture."
 #endif
 
-    // Save stack pointer.
+    // Subtracted (multiple of 2)*sizeof(uintptr_t), so sp is still double-word-size (16-byte for amd64, 8-byte for i386 and ARM) aligned.
+
+    /* Set up stack pointer. */
     context.pointer = sp;
 
-    // Our coroutines never return, so we don't put anything else on the stack.
+    /* Our coroutines never return, so we don't put anything else on the stack.
+    */
 }
 
 artificial_stack_t::~artificial_stack_t() {
@@ -444,8 +265,8 @@ void context_switch(artificial_stack_context_ref_t *current_context_out, artific
 }
 
 asm(
-#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined (__s390x__)
-// We keep architecture-specific code interleaved in order to enforce commonality.
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+// We keep the i386, x86_64, and ARM stuff interleaved in order to enforce commonality.
 #if defined(__x86_64__)
 #if defined(__LP64__) || defined(__LLP64__)
 // Pointers are of the right size
@@ -463,19 +284,18 @@ asm(
     /* `current_pointer_out` is in `%rdi`. `dest_pointer` is in `%rsi`. */
 #elif defined(__arm__)
     /* `current_pointer_out` is in `r0`. `dest_pointer` is in `r1` */
-#elif defined(__s390x_)
-    /* `current_pointer_out` is in `%r2`. `dest_pointer` is in `%r3`. */
+#elif defined(__aarch64__)
+/* `current_pointer_out` is in `r0`. `dest_pointer` is in `r1` */
 #endif
 
-    // Save preserved registers.
+    /* Save preserved registers (the return address is already on the stack). */
 #if defined(__i386__)
-    // Preserve esi, edi, ebx, and ebp. The return address is already on the stack.
+    /* For i386, we must preserve esi, edi, ebx, ebp, and esp. */
     "push %esi\n"
     "push %edi\n"
     "push %ebx\n"
     "push %ebp\n"
 #elif defined(__x86_64__)
-    // Preserve r12-r15, rbx, and rbp. The return address is already on the stack.
     "pushq %r12\n"
     "pushq %r13\n"
     "pushq %r14\n"
@@ -483,23 +303,15 @@ asm(
     "pushq %rbx\n"
     "pushq %rbp\n"
 #elif defined(__arm__)
-    // Preserve r4-r12 and the return address (r14). For consistency with x86 r12 is
-    // pushed first, followed by r14 and then r4-r11.
+    /* Note that we push `LR` (`r14`) since that's not implicitly done at a call on ARM. We include `r12` just to keep the stack double-word-aligned. The order here is really important, as it must match the way we set up the stack in artificial_stack_t::artificial_stack_t. For consistency with the other architectures, we push `r12` first, then `r14`, then the rest. */
     "push {r12}\n"
     "push {r14}\n"
     "push {r4-r11}\n"
-#elif defined(__s390x__)
-    // Preserve r6-r13, the return address (r14), and f8-f15.
-    "aghi %r15, -136\n"
-    "stmg %r6, %r14, 64(%r15)\n"
-    "std %f8, 0(%r15)\n"
-    "std %f9, 8(%r15)\n"
-    "std %f10, 16(%r15)\n"
-    "std %f11, 24(%r15)\n"
-    "std %f12, 32(%r15)\n"
-    "std %f13, 40(%r15)\n"
-    "std %f14, 48(%r15)\n"
-    "std %f15, 56(%r15)\n"
+#elif defined(__aarch64__)
+    /* Note that we push `LR` (`r14`) since that's not implicitly done at a call on ARM. We include `r12` just to keep the stack double-word-aligned. The order here is really important, as it must match the way we set up the stack in artificial_stack_t::artificial_stack_t. For consistency with the other architectures, we push `r12` first, then `r14`, then the rest. */
+    "push {r12}\n"
+    "push {r14}\n"
+    "push {r4-r11}\n"
 #endif
 
     /* Save old stack pointer. */
@@ -514,9 +326,9 @@ asm(
 #elif defined(__arm__)
     /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
     "str r13, [r0]\n"
-#elif defined(__s390x__)
-    /* On s390x, the first argument is in r2. r15 is the stack pointer. */
-    "stg %r15, 0(%r2)\n"
+#elif defined(__aarch64__)
+    /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
+    "str r13, [r0]\n"
 #endif
 
     /* Load the new stack pointer and the preserved registers. */
@@ -531,9 +343,9 @@ asm(
 #elif defined(__arm__)
     /* On ARM, the second argument is in `r1` */
     "mov r13, r1\n"
-#elif defined(__s390x__)
-    /* On s390x, the second argument is in r3 */
-    "lgr %r15, %r3\n"
+#elif defined(__aarch64__)
+    /* On ARM, the second argument is in `r1` */
+    "mov r13, r1\n"
 #endif
 
 #if defined(__i386__)
@@ -552,17 +364,10 @@ asm(
     "pop {r4-r11}\n"
     "pop {r14}\n"
     "pop {r12}\n"
-#elif defined(__s390x__)
-    "lmg %r6, %r14, 64(%r15)\n"
-    "ld %f8, 0(%r15)\n"
-    "ld %f9, 8(%r15)\n"
-    "ld %f10, 16(%r15)\n"
-    "ld %f11, 24(%r15)\n"
-    "ld %f12, 32(%r15)\n"
-    "ld %f13, 40(%r15)\n"
-    "ld %f14, 48(%r15)\n"
-    "ld %f15, 56(%r15)\n"
-    "aghi %r15, 136\n"
+#elif defined(__aarch64__)
+    "pop {r4-r11}\n"
+    "pop {r14}\n"
+    "pop {r12}\n"
 #endif
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -575,9 +380,10 @@ asm(
     /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
     jump to the correct return address. */
     "bx r14\n"
-#elif defined(__s390x__)
-    /* Above, we popped the return address (r14) off the stack. */
-    "br %r14\n"
+#elif defined(__aarch64__)
+    /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
+    jump to the correct return address. */
+    "bx r14\n"
 #endif
 
 #else
