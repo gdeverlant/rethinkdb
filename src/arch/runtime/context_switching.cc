@@ -260,6 +260,9 @@ artificial_stack_t::artificial_stack_t(void (*initial_fun)(void), size_t _stack_
 #elif defined(__arm__)
     // This slot is used to store r12.
     const size_t min_frame = 1;
+#elif defined(__aarch64__)
+    // This slot is used to store r12.
+    const size_t min_frame = 1;
 #endif
     // Zero the caller stack frame. Prevents Valgrind complaining about uninitialized
     // value errors when throwing an uncaught exception.
@@ -281,6 +284,10 @@ artificial_stack_t::artificial_stack_t(void (*initial_fun)(void), size_t _stack_
 #elif defined(__x86_64__)
     sp -= 6; // r12-r15, rbx and rbp.
 #elif defined(__arm__)
+    // Note: r12 is also stored, in the 'caller frame' slot above the return
+    // address.
+    sp -= 8; // r4-r11.
+#elif defined(__aarch64__)
     // Note: r12 is also stored, in the 'caller frame' slot above the return
     // address.
     sp -= 8; // r4-r11.
@@ -444,7 +451,7 @@ void context_switch(artificial_stack_context_ref_t *current_context_out, artific
 }
 
 asm(
-#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined (__s390x__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__) || defined (__s390x__)
 // We keep architecture-specific code interleaved in order to enforce commonality.
 #if defined(__x86_64__)
 #if defined(__LP64__) || defined(__LLP64__)
@@ -462,6 +469,8 @@ asm(
 #elif defined(__x86_64__)
     /* `current_pointer_out` is in `%rdi`. `dest_pointer` is in `%rsi`. */
 #elif defined(__arm__)
+    /* `current_pointer_out` is in `r0`. `dest_pointer` is in `r1` */
+#elif defined(__aarch64__)
     /* `current_pointer_out` is in `r0`. `dest_pointer` is in `r1` */
 #elif defined(__s390x_)
     /* `current_pointer_out` is in `%r2`. `dest_pointer` is in `%r3`. */
@@ -488,6 +497,13 @@ asm(
     "push {r12}\n"
     "push {r14}\n"
     "push {r4-r11}\n"
+#elif defined(__aarch64__)
+    // Preserve r4-r12 and the return address (r14). For consistency with x86 r12 is
+    // pushed first, followed by r14 and then r4-r11.
+    // TODO: Find the correct translation from arm32 to arm64 for the following registry operations
+	//"push {r12}\n"
+    //"push {r14}\n"
+    //"push {r4-r11}\n"
 #elif defined(__s390x__)
     // Preserve r6-r13, the return address (r14), and f8-f15.
     "aghi %r15, -136\n"
@@ -514,6 +530,10 @@ asm(
 #elif defined(__arm__)
     /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
     "str r13, [r0]\n"
+#elif defined(__aarch64__)
+	// TODO: Translate the following lines from arm32 to arm64
+    /* On ARM, the first argument is in `r0`. `r13` is the stack pointer. */
+    //"str r13, [r0]\n"
 #elif defined(__s390x__)
     /* On s390x, the first argument is in r2. r15 is the stack pointer. */
     "stg %r15, 0(%r2)\n"
@@ -531,6 +551,10 @@ asm(
 #elif defined(__arm__)
     /* On ARM, the second argument is in `r1` */
     "mov r13, r1\n"
+#elif defined(__aarch64__)
+	// TODO: Translate the following lines from arm32 to arm64
+    /* On ARM, the second argument is in `r1` */
+    //"mov r13, r1\n"
 #elif defined(__s390x__)
     /* On s390x, the second argument is in r3 */
     "lgr %r15, %r3\n"
@@ -552,6 +576,11 @@ asm(
     "pop {r4-r11}\n"
     "pop {r14}\n"
     "pop {r12}\n"
+#elif defined(__aarch64__)
+	// TODO: Translate the following lines from arm32 to arm64
+    //"pop {r4-r11}\n"
+    //"pop {r14}\n"
+    //"pop {r12}\n"	
 #elif defined(__s390x__)
     "lmg %r6, %r14, 64(%r15)\n"
     "ld %f8, 0(%r15)\n"
@@ -575,6 +604,11 @@ asm(
     /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
     jump to the correct return address. */
     "bx r14\n"
+#elif defined(__aarch64__)
+	// TODO: Translate the following lines from arm32 to arm64
+    /* Above, we popped `LR` (`r14`) off the stack, so the bx instruction will
+    jump to the correct return address. */
+    //"bx r14\n"
 #elif defined(__s390x__)
     /* Above, we popped the return address (r14) off the stack. */
     "br %r14\n"
